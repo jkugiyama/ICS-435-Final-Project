@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -118,3 +119,42 @@ def evaluate(name, model, X_test, y_test):
 
 evaluate("Logistic Regression", lr, X_test_scaled, y_test)
 evaluate("Random Forest", rf, X_test, y_test)
+
+# Heatmap: model correctness on the test set
+lr_pred = lr.predict(X_test_scaled)
+rf_pred = rf.predict(X_test)
+
+correctness_pct = pd.DataFrame(
+    {
+        "Correct (%)": [
+            100 * np.mean(lr_pred == y_test),
+            100 * np.mean(rf_pred == y_test),
+        ],
+        "Incorrect (%)": [
+            100 * np.mean(lr_pred != y_test),
+            100 * np.mean(rf_pred != y_test),
+        ],
+    },
+    index=["Logistic Regression", "Random Forest"],
+)
+
+fig, ax = plt.subplots(figsize=(8, 3.5))
+im = ax.imshow(correctness_pct.values, cmap="YlGn", aspect="auto", vmin=0, vmax=100)
+
+ax.set_xticks(range(correctness_pct.shape[1]))
+ax.set_xticklabels(correctness_pct.columns)
+ax.set_yticks(range(correctness_pct.shape[0]))
+ax.set_yticklabels(correctness_pct.index)
+ax.set_title("Model Correctness Heatmap (Test Set)")
+
+for i in range(correctness_pct.shape[0]):
+    for j in range(correctness_pct.shape[1]):
+        val = correctness_pct.iloc[i, j]
+        ax.text(j, i, f"{val:.2f}%", ha="center", va="center", color="black")
+
+fig.colorbar(im, ax=ax, label="Percentage")
+plt.tight_layout()
+plt.savefig("model_correctness_heatmap.png", dpi=200)
+plt.close(fig)
+
+print("Saved heatmap to model_correctness_heatmap.png")
