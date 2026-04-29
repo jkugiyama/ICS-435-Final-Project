@@ -8,6 +8,9 @@ from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import GradientBoostingClassifier
 
 
 def to_snake_case(name: str) -> str:
@@ -60,82 +63,125 @@ matchups["win_team1"] = matchups["win_team1"].astype(int)
 # # Assume win column exists (1 = win, 0 = loss)
 y = matchups["win_team1"]
 
-# Feature Engineering
-# Example: point difference between teams
-matchups["point_diff"] = (
-    matchups["team_score_team1"] - matchups["team_score_team2"]
+# Keep one row per game (team1 is the home team) to avoid mirrored duplicates.
+matchups["home_team1"] = pd.to_numeric(matchups["home_team1"], errors="coerce")
+matchups = matchups[matchups["home_team1"] == 1].copy()
+
+# Pre-game feature engineering (avoid post-game leakage like scores/box score stats).
+for col in [
+    "season_wins_team1",
+    "season_wins_team2",
+    "season_losses_team1",
+    "season_losses_team2",
+]:
+    matchups[col] = pd.to_numeric(matchups[col], errors="coerce")
+
+matchups["season_wins_diff"] = (
+    matchups["season_wins_team1"] - matchups["season_wins_team2"]
+)
+matchups["season_losses_diff"] = (
+    matchups["season_losses_team1"] - matchups["season_losses_team2"]
 )
 
-# You can add more differences:
-# rebounds, assists, etc.
-matchups["reb_diff"] = (
-    matchups["rebounds_total_team1"] - matchups["rebounds_total_team2"]
-)
+matchups["win_pct_team1"] = matchups["season_wins_team1"] / (
+    matchups["season_wins_team1"] + matchups["season_losses_team1"]
+).replace(0, pd.NA)
+matchups["win_pct_team2"] = matchups["season_wins_team2"] / (
+    matchups["season_wins_team2"] + matchups["season_losses_team2"]
+).replace(0, pd.NA)
+matchups["win_pct_diff"] = matchups["win_pct_team1"] - matchups["win_pct_team2"]
 
-# Select Features
+# Select pre-game features only.
 features = [
-    "point_diff",
-    "reb_diff",
-    # add more as needed
+    "season_wins_diff",
+    "season_losses_diff",
+    "win_pct_diff",
 ]
 
 matchups[features] = matchups[features].apply(pd.to_numeric, errors="coerce")
 model_df = matchups.dropna(subset=features + ["win_team1"]).copy()
 
-X = model_df[features]
-y = model_df["win_team1"]
-
-# Train/Test Split
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42
+# Split by game_id so no game appears in both train and test sets.
+game_ids = model_df["game_id"].drop_duplicates()
+train_game_ids, test_game_ids = train_test_split(
+    game_ids, test_size=0.2, random_state=42
 )
+
+train_df = model_df[model_df["game_id"].isin(train_game_ids)].copy()
+test_df = model_df[model_df["game_id"].isin(test_game_ids)].copy()
+
+X_train = train_df[features]
+y_train = train_df["win_team1"]
+X_test = test_df[features]
+y_test = test_df["win_team1"]
 
 # Scaling
 scaler = StandardScaler()
 X_train_scaled = scaler.fit_transform(X_train)
 X_test_scaled = scaler.transform(X_test)
 
-# Train Models
-lr = LogisticRegression()
-lr.fit(X_train_scaled, y_train)
+# Train and compare models
+models = [
+    ("Logistic Regression", LogisticRegression(max_iter=1000), True),
+    ("Random Forest", RandomForestClassifier(n_estimators=200, random_state=42), False),
+    ("KNN (k=11)", KNeighborsClassifier(n_neighbors=11), True),
+    ("Decision Tree", DecisionTreeClassifier(max_depth=6, random_state=42), False),
+    (
+        "Gradient Boosting",
+        GradientBoostingClassifier(random_state=42),
+        False,
+    ),
+]
 
-rf = RandomForestClassifier(n_estimators=100, random_state=42)
-rf.fit(X_train, y_train)
+results = []
+predictions = {}
 
-# Evaluation
-def evaluate(name, model, X_test, y_test):
-    y_pred = model.predict(X_test)
+for name, model, use_scaled in models:
+    X_tr = X_train_scaled if use_scaled else X_train
+    X_te = X_test_scaled if use_scaled else X_test
+
+    model.fit(X_tr, y_train)
+    y_pred = model.predict(X_te)
 
     if hasattr(model, "predict_proba"):
-        y_prob = model.predict_proba(X_test)[:, 1]
+        y_prob = model.predict_proba(X_te)[:, 1]
     else:
         y_prob = y_pred
 
+    acc = accuracy_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred)
+    roc = roc_auc_score(y_test, y_prob)
+
     print(f"\n{name}")
-    print("Accuracy:", accuracy_score(y_test, y_pred))
-    print("F1:", f1_score(y_test, y_pred))
-    print("ROC-AUC:", roc_auc_score(y_test, y_prob))
+    print("Accuracy:", acc)
+    print("F1:", f1)
+    print("ROC-AUC:", roc)
 
+    results.append(
+        {
+            "Model": name,
+            "Accuracy": acc,
+            "F1": f1,
+            "ROC-AUC": roc,
+        }
+    )
+    predictions[name] = y_pred
 
-evaluate("Logistic Regression", lr, X_test_scaled, y_test)
-evaluate("Random Forest", rf, X_test, y_test)
+results_df = pd.DataFrame(results).sort_values("Accuracy", ascending=False)
+print("\nModel comparison:")
+print(results_df.to_string(index=False))
 
 # Heatmap: model correctness on the test set
-lr_pred = lr.predict(X_test_scaled)
-rf_pred = rf.predict(X_test)
-
 correctness_pct = pd.DataFrame(
     {
         "Correct (%)": [
-            100 * np.mean(lr_pred == y_test),
-            100 * np.mean(rf_pred == y_test),
+            100 * np.mean(predictions[name] == y_test) for name in results_df["Model"]
         ],
         "Incorrect (%)": [
-            100 * np.mean(lr_pred != y_test),
-            100 * np.mean(rf_pred != y_test),
+            100 * np.mean(predictions[name] != y_test) for name in results_df["Model"]
         ],
     },
-    index=["Logistic Regression", "Random Forest"],
+    index=results_df["Model"],
 )
 
 fig, ax = plt.subplots(figsize=(8, 3.5))
